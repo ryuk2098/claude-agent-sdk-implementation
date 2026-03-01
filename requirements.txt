@@ -1,0 +1,12 @@
+# Web framework
+fastapi
+uvicorn
+python-multipart
+
+# Claude Agent SDK
+claude-agent-sdk
+
+# Document parsing
+python-pptx
+python-docx
+openpyxl
