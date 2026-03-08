@@ -17,6 +17,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator
+import asyncio
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -221,16 +222,6 @@ class AgentEvent:
 # Result container
 # ---------------------------------------------------------------------------
 
-@dataclass
-class AgentResult:
-    session_id: str          # Our pre-generated app session ID
-    sdk_session_id: str      # The SDK's internal session ID (for resume)
-    result: str
-    files_modified: list[str]
-    history: list[dict]
-    is_error: bool = False
-    error_detail: str = ""
-
 
 # ---------------------------------------------------------------------------
 # Run the agent with streaming (yields AgentEvents for SSE)
@@ -404,6 +395,15 @@ async def run_agent_stream(
                         "turns_used": message.num_turns,
                         "session_id": session_id,
                     })
+
+    except asyncio.CancelledError:
+        logger.warning(f"Client disconnected during stream for session {session_id}. Cancelling agent.")
+        # We record the partial result but don't mark it as a hard error in the system
+        role = "assistant"
+        content = f"[STREAM INTERRUPTED]\n{result_text}"
+        await asyncio.to_thread(add_history_entry, WORKSPACE_DIR, session_id, role=role, content=content)
+        raise  # Re-raise so FastAPI knows the connection was cleanly closed
+
 
     except Exception as e:
         is_error = True

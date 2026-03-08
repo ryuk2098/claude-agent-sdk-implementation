@@ -8,6 +8,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import aiofiles
 
 # Configure logging
 logging.basicConfig(
@@ -19,10 +20,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from app.agent import (
-    run_agent as execute_agent,
     run_agent_stream,
     ensure_session_dirs,
-    get_session_paths,
     WORKSPACE_DIR,
 )
 from app.session_store import (
@@ -32,8 +31,6 @@ from app.session_store import (
     get_session,
     session_exists,
 )
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,17 +91,21 @@ class NewSessionResponse(BaseModel):
 async def _save_uploads(
     session_id: str, files: list[UploadFile] | None
 ) -> list[str]:
-    """Validate and save uploaded files to the session's uploads dir.
-
-    Returns the list of saved filenames.
+    """
+    Asynchronously validate and save uploaded files to the session's uploads dir.
+    Reads in chunks to prevent memory overload and avoid blocking the event loop.
     """
     if not files:
         return []
+        
     if not session_exists(WORKSPACE_DIR, session_id):
         create_session(WORKSPACE_DIR, session_id)
+        
     _, uploads_dir, _ = ensure_session_dirs(session_id)
     uploaded_names: list[str] = []
+    
     for file in files:
+        # 1. Validate extension
         ext = Path(file.filename).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
             raise HTTPException(
@@ -112,12 +113,28 @@ async def _save_uploads(
                 detail=f"File '{file.filename}' has unsupported extension '{ext}'. "
                        f"Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
             )
-        dest = uploads_dir / file.filename
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        uploaded_names.append(file.filename)
+            
+        # 2. Sanitize filename to prevent directory traversal attacks
+        safe_filename = Path(file.filename).name
+        dest = uploads_dir / safe_filename
+        
+        # 3. Asynchronously write the file in chunks
+        try:
+            async with aiofiles.open(dest, "wb") as f:
+                # Read in 1MB chunks to keep memory usage stable, 
+                # especially important for larger .pptx or .docx files.
+                while chunk := await file.read(1024 * 1024):
+                    await f.write(chunk)
+        except Exception as e:
+            logger.error(f"Failed to save file {safe_filename} for session {session_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {safe_filename}")
+        finally:
+            # Always close the FastAPI UploadFile to free up underlying spooled resources
+            await file.close()
+            
+        uploaded_names.append(safe_filename)
+        
     return uploaded_names
-
 
 # ---------------------------------------------------------------------------
 # Endpoints
