@@ -23,6 +23,8 @@ export interface ConversationTurn {
   segments: TurnSegment[];
   isStreaming: boolean;
   streamPhase: 'idle' | 'steps' | 'text' | 'done';
+  messageId?: string;                              // backend message_id for feedback
+  feedbackSentiment?: 'liked' | 'disliked';       // set after feedback submitted
   result?: {
     status: 'success' | 'error';
     text: string;
@@ -66,18 +68,19 @@ export interface PaginatedSessions {
   has_more: boolean;
 }
 
-export interface HistoryEntry {
-  role: string;
-  content: string;
-  timestamp: string;
-}
-
-export interface PaginatedHistory {
-  history: HistoryEntry[];
-  total: number;
-  page: number;
-  page_size: number;
-  has_more: boolean;
+// Messages API types (replaces old history)
+export interface MessageTurn {
+  message_id: string;
+  conversation_id: string;
+  user_message: string;
+  agent_response: string | null;
+  error: string | null;
+  files_uploaded: string[];
+  is_liked: boolean | null;
+  turns_used: number | null;
+  cost_usd: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +89,7 @@ export interface PaginatedHistory {
 
 export type AgentEventType =
   | 'session_start'
+  | 'message_created'
   | 'status'
   | 'tool_start'
   | 'tool_end'
@@ -98,6 +102,7 @@ export type AgentEventType =
 export interface AgentEvent {
   type: AgentEventType;
   session_id?: string;
+  message_id?: string;
   message?: string;
   tool?: string;
   summary?: string;

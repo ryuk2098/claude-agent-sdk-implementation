@@ -1,24 +1,27 @@
 import { useState } from 'react';
 import {
   ChevronDown, ChevronRight, Check, AlertCircle, FileText,
-  Copy, CheckCheck, Loader2,
+  Copy, CheckCheck, Loader2, ThumbsUp, ThumbsDown,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useChatStore } from '../store/chatStore';
 import { ConversationTurn, TurnSegment } from '../types';
+import FeedbackModal from './FeedbackModal';
 import clsx from 'clsx';
 
 interface TurnItemProps {
   turn: ConversationTurn;
-  chatId: string;
+  chatId: string;       // local store ID (for store actions)
+  sessionId: string;   // MongoDB session_id (for API calls)
   isActive: boolean;
 }
 
-export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
-  const { toggleSegmentStepsCollapsed } = useChatStore();
+export default function TurnItem({ turn, chatId, sessionId, isActive }: TurnItemProps) {
+  const { toggleSegmentStepsCollapsed, updateTurn } = useChatStore();
   const [copied, setCopied] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+  const [feedbackModal, setFeedbackModal] = useState<'liked' | 'disliked' | null>(null);
 
   const handleCopyUser = async () => {
     await navigator.clipboard.writeText(turn.userMessage);
@@ -41,7 +44,7 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
   return (
     <div className="animate-[slideUp_0.2s_ease-out] space-y-3">
       {/* User Message */}
-      <div className="group relative">
+      <div>
         <div className="bg-[#222228] border border-[#2e2e3a] rounded-2xl px-5 py-4">
           <div className="prose-agent text-sm text-[#e0e0f0] leading-relaxed">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -62,12 +65,16 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
             </div>
           )}
         </div>
-        <button
-          onClick={handleCopyUser}
-          className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-[#5a5a6a] hover:text-[#00a8e8] hover:bg-[#2a2a38]"
-        >
-          {copied ? <CheckCheck size={13} className="text-[#00a8e8]" /> : <Copy size={13} />}
-        </button>
+        {/* Copy button below user bubble */}
+        <div className="flex items-center gap-1 mt-1.5 pl-1">
+          <button
+            onClick={handleCopyUser}
+            className="p-1.5 rounded-lg text-[#7a7a9a] hover:text-[#00a8e8] hover:bg-[#2a2a38] transition-colors"
+            title="Copy message"
+          >
+            {copied ? <CheckCheck size={14} className="text-[#00a8e8]" /> : <Copy size={14} />}
+          </button>
+        </div>
       </div>
 
       {/* Agent Response — ordered segments */}
@@ -107,23 +114,52 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
 
               {/* Text output for this segment */}
               {hasText && (
-                <div className="group/text relative bg-[#1e1e26] border border-[#2e2e3a] rounded-xl px-5 py-4">
-                  <div className="prose-agent">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {segment.text}
-                    </ReactMarkdown>
-                    {isStreamingSeg && turn.streamPhase === 'text' && (
-                      <span className="typing-cursor" />
-                    )}
+                <div>
+                  <div className="bg-[#1e1e26] border border-[#2e2e3a] rounded-xl px-5 py-4">
+                    <div className="prose-agent">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {segment.text}
+                      </ReactMarkdown>
+                      {isStreamingSeg && turn.streamPhase === 'text' && (
+                        <span className="typing-cursor" />
+                      )}
+                    </div>
                   </div>
-                  {/* Copy button only on last segment after streaming finishes */}
+                  {/* Action buttons — always visible below last segment after streaming */}
                   {isLastSeg && !turn.isStreaming && (
-                    <button
-                      onClick={handleCopyText}
-                      className="absolute top-3 right-3 opacity-0 group-hover/text:opacity-100 transition-opacity p-1 rounded text-[#5a5a6a] hover:text-[#00a8e8] hover:bg-[#2a2a38]"
-                    >
-                      {copiedText ? <CheckCheck size={13} className="text-[#00a8e8]" /> : <Copy size={13} />}
-                    </button>
+                    <div className="flex items-center gap-0.5 mt-1.5 pl-1">
+                      <button
+                        onClick={handleCopyText}
+                        className="p-1.5 rounded-lg text-[#7a7a9a] hover:text-[#00a8e8] hover:bg-[#2a2a38] transition-colors"
+                        title="Copy response"
+                      >
+                        {copiedText ? <CheckCheck size={14} className="text-[#00a8e8]" /> : <Copy size={14} />}
+                      </button>
+                      <button
+                        onClick={() => setFeedbackModal('liked')}
+                        className={clsx(
+                          'p-1.5 rounded-lg transition-colors',
+                          turn.feedbackSentiment === 'liked'
+                            ? 'text-green-400'
+                            : 'text-[#7a7a9a] hover:text-green-400 hover:bg-[#2a2a38]'
+                        )}
+                        title="Helpful"
+                      >
+                        <ThumbsUp size={14} />
+                      </button>
+                      <button
+                        onClick={() => setFeedbackModal('disliked')}
+                        className={clsx(
+                          'p-1.5 rounded-lg transition-colors',
+                          turn.feedbackSentiment === 'disliked'
+                            ? 'text-red-400'
+                            : 'text-[#7a7a9a] hover:text-red-400 hover:bg-[#2a2a38]'
+                        )}
+                        title="Not helpful"
+                      >
+                        <ThumbsDown size={14} />
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
@@ -194,6 +230,18 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
           </div>
         )}
       </div>
+
+      {/* Feedback modal */}
+      {feedbackModal && turn.messageId && (
+        <FeedbackModal
+          messageId={turn.messageId}
+          initialSentiment={feedbackModal}
+          onClose={() => setFeedbackModal(null)}
+          onSubmitted={(sentiment) => {
+            updateTurn(chatId, turn.id, { feedbackSentiment: sentiment });
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { useChatStore } from '../store/chatStore';
 import { createSession, renameSession } from '../api/sessions';
 import { parseSSEStream } from '../utils/stream';
 import { AgentStep, TurnSegment, ConversationTurn } from '../types';
+import { apiFetch, ForbiddenError } from '../api/auth';
 import TurnItem from './TurnItem';
 import InputArea from './InputArea';
 
@@ -156,7 +157,7 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
         formData.append('files', file);
       }
 
-      const response = await fetch('/agent/stream', {
+      const response = await apiFetch('/agent/stream', {
         method: 'POST',
         body: formData,
       });
@@ -200,6 +201,12 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
           case 'session_start':
             if (event.session_id) {
               updateChatSession(currentChatId!, event.session_id);
+            }
+            break;
+
+          case 'message_created':
+            if (event.message_id) {
+              updateTurn(currentChatId!, turnId, { messageId: event.message_id });
             }
             break;
 
@@ -335,6 +342,14 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
         }
       }
     } catch (err: unknown) {
+      if (err instanceof ForbiddenError) {
+        updateTurn(currentChatId!, turnId, {
+          isStreaming: false,
+          streamPhase: 'done',
+          error: 'Access denied — this session belongs to another account.',
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Unknown error';
       updateTurn(currentChatId!, turnId, {
         isStreaming: false,
@@ -400,6 +415,7 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
                 key={turn.id}
                 turn={turn}
                 chatId={chatId!}
+                sessionId={sessionId ?? ''}
                 isActive={turn.id === activeTurnId}
               />
             ))}

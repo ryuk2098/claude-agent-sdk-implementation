@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { Chat, ConversationTurn, AgentStep, TurnSegment, SessionListItem } from '../types';
-import { fetchSessions, fetchSessionHistory } from '../api/sessions';
+import { fetchSessions, fetchSessionMessages, MessageTurn } from '../api/sessions';
+import { ForbiddenError } from '../api/auth';
 
 function generateId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -26,6 +27,10 @@ interface ChatStore {
   historyPageMap: Record<string, number>;       // sessionId → next page to load
   historyHasMoreMap: Record<string, boolean>;   // sessionId → has more pages
   isLoadingHistory: boolean;
+
+  // Pending navigation error (set by store, consumed + cleared by component via navigate)
+  pendingError: string | null;
+  clearPendingError: () => void;
 
   // Actions — chat management
   createChat: () => Chat;
@@ -80,6 +85,7 @@ export const useChatStore = create<ChatStore>()(
       historyPageMap: {},
       historyHasMoreMap: {},
       isLoadingHistory: false,
+      pendingError: null,
 
       // ── Chat management ───────────────────────────────────────
 
@@ -327,6 +333,8 @@ export const useChatStore = create<ChatStore>()(
       toggleSidebar: () =>
         set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
+      clearPendingError: () => set({ pendingError: null }),
+
       // ── API-driven session list ───────────────────────────────
 
       loadSessions: async (reset = false) => {
@@ -374,8 +382,8 @@ export const useChatStore = create<ChatStore>()(
 
         set({ isLoadingHistory: true });
         try {
-          const data = await fetchSessionHistory(sessionId, 1, 20);
-          const turns = historyToTurns(data.history);
+          const data = await fetchSessionMessages(sessionId, 1, 20);
+          const turns = messagesToTurns(data.messages);
 
           set((s) => ({
             chats: s.chats.map((c) =>
@@ -386,8 +394,26 @@ export const useChatStore = create<ChatStore>()(
             isLoadingHistory: false,
           }));
         } catch (err) {
+          if (err instanceof ForbiddenError) {
+            set((s) => ({
+              chats: s.chats.filter((c) => c.id !== chatId),
+              activeChatId: s.activeChatId === chatId ? null : s.activeChatId,
+              isLoadingHistory: false,
+              pendingError: 'Conversation not found — it may have been deleted.',
+            }));
+            return;
+          }
+          const msg = err instanceof Error ? err.message : '';
+          const errorText = (msg.includes('404') || msg.toLowerCase().includes('not found'))
+            ? 'Conversation not found — it may have been deleted.'
+            : 'Could not load conversation. Please try again.';
           console.error('Failed to load history:', err);
-          set({ isLoadingHistory: false });
+          set((s) => ({
+            chats: s.chats.filter((c) => c.id !== chatId),
+            activeChatId: s.activeChatId === chatId ? null : s.activeChatId,
+            isLoadingHistory: false,
+            pendingError: errorText,
+          }));
         }
       },
 
@@ -400,8 +426,8 @@ export const useChatStore = create<ChatStore>()(
         set({ isLoadingHistory: true });
 
         try {
-          const data = await fetchSessionHistory(sessionId, nextPage, 20);
-          const newTurns = historyToTurns(data.history);
+          const data = await fetchSessionMessages(sessionId, nextPage, 20);
+          const newTurns = messagesToTurns(data.messages);
 
           set((s) => {
             const chat = s.chats.find((c) => c.id === chatId);
@@ -435,44 +461,38 @@ export const useChatStore = create<ChatStore>()(
 );
 
 // ---------------------------------------------------------------------------
-// Helper: convert flat history entries into paired ConversationTurns
+// Helper: convert message documents into ConversationTurns
 // ---------------------------------------------------------------------------
-function historyToTurns(history: { role: string; content: string; timestamp: string }[]): ConversationTurn[] {
-  const turns: ConversationTurn[] = [];
+function messagesToTurns(messages: MessageTurn[]): ConversationTurn[] {
+  return messages.map((msg) => {
+    const segment: TurnSegment = {
+      id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+      steps: [],
+      stepsCollapsed: false,
+      text: msg.agent_response ?? '',
+    };
 
-  for (let i = 0; i < history.length; i++) {
-    const entry = history[i];
-    if (entry.role === 'user') {
-      const next = history[i + 1];
-      const agentText =
-        next && (next.role === 'assistant' || next.role === 'error')
-          ? next.content
-          : '';
-      if (next && (next.role === 'assistant' || next.role === 'error')) {
-        i++;
-      }
-
-      const segment: TurnSegment = {
-        id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
-        steps: [],
-        stepsCollapsed: false,
-        text: agentText,
-      };
-
-      turns.push({
-        id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
-        userMessage: entry.content,
-        userFiles: [],
-        segments: [segment],
-        isStreaming: false,
-        streamPhase: 'done',
-        filesCreated: [],
-        error: next?.role === 'error' ? next.content : undefined,
-        timestamp: new Date(entry.timestamp),
-        fromHistory: true,
-      });
-    }
-  }
-
-  return turns;
+    return {
+      id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+      userMessage: msg.user_message,
+      userFiles: msg.files_uploaded ?? [],
+      segments: [segment],
+      isStreaming: false,
+      streamPhase: 'done' as const,
+      filesCreated: [],
+      messageId: msg.message_id,
+      feedbackSentiment: msg.is_liked === true ? 'liked' : msg.is_liked === false ? 'disliked' : undefined,
+      error: msg.error ?? undefined,
+      result: msg.turns_used != null || msg.cost_usd != null
+        ? {
+            status: 'success' as const,
+            text: msg.agent_response ?? '',
+            turnsUsed: msg.turns_used ?? undefined,
+            costUsd: msg.cost_usd ?? undefined,
+          }
+        : undefined,
+      timestamp: new Date(msg.created_at),
+      fromHistory: true,
+    };
+  });
 }

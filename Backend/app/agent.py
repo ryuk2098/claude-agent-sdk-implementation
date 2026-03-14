@@ -30,15 +30,14 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import StreamEvent
 
 from app.hooks import block_deletions, enforce_file_isolation
-from app.session_store import (
-    add_history_entry,
+from app.db.sessions import (
     create_session,
     generate_session_id,
-    get_history,
     get_session,
     session_exists,
     update_session,
 )
+from app.db.messages import get_messages_paginated
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -231,6 +230,8 @@ async def run_agent_stream(
     instruction: str,
     session_id: str | None = None,
     uploaded_files: list[str] | None = None,
+    user_id: str | None = None,
+    user_email: str | None = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """
     Execute an agent query and yield AgentEvent objects in real-time.
@@ -247,15 +248,23 @@ async def run_agent_stream(
         logger.info(f"Stream: Generated new session_id: {session_id}")
 
     if is_new:
-        await create_session(session_id)
+        await create_session(session_id, user_id or "", user_email or "")
         sdk_session_id = None
         history = []
         logger.info(f"Stream: Created new session record for {session_id}")
     else:
         session_data = await get_session(session_id)
         sdk_session_id = session_data.get("sdk_session_id")
-        history = session_data.get("history", [])
-        logger.info(f"Stream: Resuming session {session_id} (SDK ID: {sdk_session_id}) with {len(history)} history items")
+        # Load history from messages collection (convert turns to flat role/content pairs)
+        msg_result = await get_messages_paginated(session_id, page=1, page_size=50)
+        history = []
+        for msg in msg_result["messages"]:
+            history.append({"role": "user", "content": msg["user_message"], "timestamp": msg["created_at"]})
+            if msg.get("agent_response"):
+                history.append({"role": "assistant", "content": msg["agent_response"], "timestamp": msg["updated_at"]})
+            elif msg.get("error"):
+                history.append({"role": "error", "content": msg["error"], "timestamp": msg["updated_at"]})
+        logger.info(f"Stream: Resuming session {session_id} (SDK ID: {sdk_session_id}) with {len(history)} history entries")
 
     session_root, _, processed_dir = ensure_session_dirs(session_id)
 
@@ -279,8 +288,6 @@ async def run_agent_stream(
     logger.info(f"Stream: Built options for session {session_id}. History passed: {bool(options.system_prompt.get('append'))}")
     logger.info(f"Stream: System prompt append:\n{options.system_prompt.get('append')}")
     logger.info(f"Stream: User instruction:\n{instruction}")
-
-    await add_history_entry(session_id, role="user", content=instruction)
 
     # Emit the session_id immediately so the client knows which session to poll
     yield AgentEvent("session_start", {"session_id": session_id})
@@ -398,17 +405,11 @@ async def run_agent_stream(
 
     except asyncio.CancelledError:
         logger.warning(f"Client disconnected during stream for session {session_id}. Cancelling agent.")
-        # We record the partial result but don't mark it as a hard error in the system
-        role = "assistant"
-        content = f"[STREAM INTERRUPTED]\n{result_text}"
-        await add_history_entry(session_id, role=role, content=content)
         raise  # Re-raise so FastAPI knows the connection was cleanly closed
-
 
     except Exception as e:
         is_error = True
         error_detail = str(e)
-        await add_history_entry(session_id, role="error", content=str(e))
         yield AgentEvent("error", {
             "message": f"Exception: {error_detail}",
             "session_id": session_id,
@@ -418,11 +419,7 @@ async def run_agent_stream(
             logger.error(f"Failed to resume session {session_id}: {e}")
         return  # Stop the generator
 
-    # --- Persist results ---
-    role = "error" if is_error else "assistant"
-    content = f"[ERROR] {error_detail}\n{result_text}" if is_error else result_text
-    await add_history_entry(session_id, role=role, content=content)
-
+    # --- Persist SDK session ID ---
     await update_session(
         session_id,
         sdk_session_id=captured_sdk_session_id,

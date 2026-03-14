@@ -4,17 +4,20 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.agent import ensure_session_dirs, run_agent_stream
-from app.session_store import (
+from app.core.dependencies import get_current_user
+from app.db.sessions import (
     create_session,
     generate_session_id,
     get_session,
+    session_belongs_to_user,
     session_exists,
     set_session_title,
 )
+from app.db.messages import create_message, update_message_response
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +31,7 @@ async def _save_uploads(session_id: str, files: list[UploadFile] | None) -> list
         return []
 
     if not await session_exists(session_id):
-        await create_session(session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
 
     _, uploads_dir, _ = ensure_session_dirs(session_id)
     uploaded_names: list[str] = []
@@ -50,7 +53,7 @@ async def _save_uploads(session_id: str, files: list[UploadFile] | None) -> list
                 while chunk := await file.read(1024 * 1024):
                     await f.write(chunk)
         except Exception as e:
-            logger.error(f"Failed to save file {safe_filename} for session {session_id}: {e}")
+            logger.error(f"Failed to save file {safe_filename}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to save file: {safe_filename}")
         finally:
             await file.close()
@@ -65,52 +68,94 @@ async def agent_stream_endpoint(
     instruction: str = Form(...),
     session_id: Optional[str] = Form(None),
     files: list[UploadFile] = File(default=[]),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Send an instruction to the Claude agent with real-time SSE streaming.
+    """Stream agent responses via SSE. Requires authentication."""
 
-    Accepts multipart form data:
-    - instruction: The natural language instruction (required)
-    - session_id: Session ID to resume (optional, omit for new session)
-    - files: .pptx/.docx/.xlsx files to upload (optional)
+    user_id = current_user["user_id"]
+    user_email = current_user["email"]
 
-    Returns a Server-Sent Events stream with event types:
-    session_start, status, tool_start, tool_end, text_delta, error, result, files, done.
-    """
-    if files and not session_id:
+    # Generate session if not provided
+    if not session_id:
         session_id = generate_session_id()
-        logger.info(f"Generated new session_id for upload: {session_id}")
+        logger.info(f"Generated new session_id: {session_id}")
 
-    uploaded_names = []
-    if session_id and files:
+    # Ensure session exists and belongs to current user
+    if await session_exists(session_id):
+        if not await session_belongs_to_user(session_id, user_id):
+            raise HTTPException(status_code=403, detail="Access denied to this session")
+    else:
+        await create_session(session_id, user_id, user_email)
+
+    # Handle file uploads
+    uploaded_names: list[str] = []
+    if files:
         logger.info(f"Processing {len(files)} uploads for session {session_id}...")
         uploaded_names = await _save_uploads(session_id, files)
-        logger.info(f"Saved uploads: {uploaded_names}")
 
-    logger.info(f"Starting stream for session={session_id}, instruction='{instruction}'")
+    # Set session title from first message if not yet set
+    existing = await get_session(session_id)
+    if existing is None or existing.get("title") is None:
+        await set_session_title(session_id, instruction[:80].strip())
 
-    # Set title immediately (before stream starts) if session has no title yet.
-    # This ensures the sidebar shows the correct title as soon as the user sends a message.
-    if session_id:
-        existing = await get_session(session_id) if await session_exists(session_id) else None
-        if existing is None or existing.get("title") is None:
-            await set_session_title(session_id, instruction[:80].strip())
-            logger.info(f"Title set for session {session_id}: '{instruction[:80].strip()}'")
+    # Create the message document immediately (user side)
+    message_doc = await create_message(
+        conversation_id=session_id,
+        user_id=user_id,
+        user_email=user_email,
+        user_message=instruction,
+        files_uploaded=uploaded_names,
+    )
+    message_id = message_doc["message_id"]
+
+    logger.info(f"Starting stream for session={session_id}, message_id={message_id}")
 
     async def event_generator():
-        nonlocal session_id
+        accumulated_text = ""
+        is_error = False
+        error_msg = None
+        turns_used = None
+        cost_usd = None
+
+        # Emit message_id immediately so the frontend can attach feedback
+        yield f'data: {{"type": "message_created", "message_id": "{message_id}"}}\n\n'
 
         try:
             async for event in run_agent_stream(
                 instruction=instruction,
                 session_id=session_id,
                 uploaded_files=uploaded_names or None,
+                user_id=user_id,
+                user_email=user_email,
             ):
+                data = json.loads(event.to_sse().replace("data: ", "").strip())
+
+                if data.get("type") == "text_delta" and data.get("text"):
+                    accumulated_text += data["text"]
+                elif data.get("type") == "result":
+                    turns_used = data.get("turns_used")
+                    cost_usd = data.get("cost_usd")
+                elif data.get("type") == "error":
+                    is_error = True
+                    error_msg = data.get("message")
+
                 yield event.to_sse()
+
         except Exception as e:
             logger.error(f"Stream error for session {session_id}: {e}", exc_info=True)
-            yield f"data: {{\"type\": \"error\", \"message\": \"Internal stream error: {str(e)}\"}}\n\n"
+            is_error = True
+            error_msg = str(e)
+            yield f'data: {{"type": "error", "message": "Internal stream error: {str(e)}"}}\n\n'
         finally:
-            logger.info(f"Stream finished for session {session_id}")
+            # Update the message document with the agent's response
+            await update_message_response(
+                message_id=message_id,
+                agent_response=accumulated_text or None,
+                error=error_msg if is_error else None,
+                turns_used=turns_used,
+                cost_usd=cost_usd,
+            )
+            logger.info(f"Stream finished for session {session_id}, message_id={message_id}")
 
     return StreamingResponse(
         event_generator(),

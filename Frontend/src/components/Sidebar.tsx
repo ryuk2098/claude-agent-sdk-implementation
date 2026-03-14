@@ -4,11 +4,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  Plus, MessageSquare, Cpu, Settings, ChevronLeft, ChevronRight,
-  Loader2, MoreHorizontal, Pencil, Trash2
+  Plus, MessageSquare, Cpu, ChevronLeft, ChevronRight,
+  Loader2, MoreHorizontal, Pencil, Trash2, LogOut,
 } from 'lucide-react';
 import { useChatStore } from '../store/chatStore';
+import { useAuthStore } from '../store/authStore';
 import { deleteSession, renameSession } from '../api/sessions';
+import { toast } from './Toast';
 import clsx from 'clsx';
 
 export default function Sidebar() {
@@ -28,8 +30,34 @@ export default function Sidebar() {
     refreshSessionInList,
   } = useChatStore();
 
+  const { user, clearAuth } = useAuthStore();
   const navigate = useNavigate();
   const { chatId: activeChatId } = useParams<{ chatId: string }>();
+
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [userMenuPos, setUserMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const userBtnRef = useRef<HTMLButtonElement>(null);
+
+  const handleLogout = () => {
+    clearAuth();
+    navigate('/login', { replace: true });
+  };
+
+  const openUserMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const rect = userBtnRef.current?.getBoundingClientRect();
+    if (rect) {
+      setUserMenuPos({ top: rect.top - 60, left: rect.left });
+    }
+    setUserMenuOpen((v) => !v);
+  };
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handler = () => setUserMenuOpen(false);
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [userMenuOpen]);
 
   const [activeTab, setActiveTab] = useState<'chats' | 'agents'>('chats');
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -89,16 +117,23 @@ export default function Sidebar() {
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
+    const { sessionId, title } = deleteTarget;
     try {
-      await deleteSession(deleteTarget.sessionId);
+      await deleteSession(sessionId);
     } catch (e) {
       console.error('Failed to delete session:', e);
     }
-    removeSessionFromList(deleteTarget.sessionId);
+    removeSessionFromList(sessionId);
     setDeleteTarget(null);
-    // If we deleted the active chat, go home
-    const wasActive = chats.find((c) => c.sessionId === deleteTarget.sessionId)?.id === activeChatId;
-    if (wasActive) navigate('/');
+    // Navigate home if we deleted the currently-viewed session.
+    // activeChatId from URL params is the sessionId (e.g. /c/{session_id}),
+    // so compare directly against sessionId as well as the local chat id.
+    const localChatId = chats.find((c) => c.sessionId === sessionId)?.id;
+    const wasActive = activeChatId === sessionId || activeChatId === localChatId;
+    if (wasActive) {
+      navigate('/');
+      toast.success(`"${title}" deleted`);
+    }
   };
 
   if (sidebarCollapsed) {
@@ -252,13 +287,55 @@ export default function Sidebar() {
           )}
         </div>
 
-        {/* Settings */}
+        {/* User footer */}
         <div className="p-3 border-t border-[#252530]">
-          <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[#4a4a5a] hover:text-[#8a8aaa] hover:bg-[#181820] text-sm transition-colors">
-            <Settings size={15} />
-            <span>Settings and more</span>
-          </button>
+          <div className="flex items-center gap-2.5 px-2 py-2 rounded-xl">
+            {/* Avatar */}
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00a8e8]/30 to-[#0077b8]/30 border border-[#00a8e8]/20 flex items-center justify-center flex-shrink-0">
+              <span className="text-xs font-bold text-[#00a8e8]">
+                {user?.username?.slice(0, 1).toUpperCase() ?? '?'}
+              </span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-[#c0c0d8] truncate">{user?.username ?? ''}</p>
+              <p className="text-[11px] text-[#3a3a4a] truncate">{user?.email ?? ''}</p>
+            </div>
+            {/* ... logout button */}
+            <button
+              ref={userBtnRef}
+              onClick={openUserMenu}
+              className={clsx(
+                'w-6 h-6 flex items-center justify-center rounded-md transition-colors flex-shrink-0',
+                userMenuOpen
+                  ? 'text-[#c0c0d8] bg-[#2a2a38]'
+                  : 'text-[#3a3a4a] hover:text-[#8a8aaa] hover:bg-[#1e1e28]'
+              )}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+          </div>
         </div>
+
+        {/* User menu portal */}
+        {userMenuOpen && userMenuPos && createPortal(
+          <div
+            style={{ position: 'fixed', top: userMenuPos.top, left: userMenuPos.left, zIndex: 9999 }}
+            className="w-44 bg-[#18181f] border border-[#2e2e3a] rounded-xl shadow-2xl shadow-black/60 overflow-hidden py-1"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 py-2 border-b border-[#252530]">
+              <p className="text-xs font-medium text-[#8a8aaa] truncate">{user?.email}</p>
+            </div>
+            <button
+              onClick={() => { setUserMenuOpen(false); handleLogout(); }}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-red-400 hover:bg-red-950/40 transition-colors"
+            >
+              <LogOut size={13} />
+              Log out
+            </button>
+          </div>,
+          document.body
+        )}
       </div>
 
       {/* Delete confirmation modal */}
