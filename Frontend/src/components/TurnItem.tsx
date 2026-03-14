@@ -6,7 +6,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useChatStore } from '../store/chatStore';
-import { ConversationTurn } from '../types';
+import { ConversationTurn, TurnSegment } from '../types';
 import clsx from 'clsx';
 
 interface TurnItemProps {
@@ -16,7 +16,7 @@ interface TurnItemProps {
 }
 
 export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
-  const { toggleStepsCollapsed } = useChatStore();
+  const { toggleSegmentStepsCollapsed } = useChatStore();
   const [copied, setCopied] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
 
@@ -27,17 +27,16 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
   };
 
   const handleCopyText = async () => {
-    await navigator.clipboard.writeText(turn.agentText);
+    const allText = turn.segments.map((s) => s.text).filter(Boolean).join('\n\n');
+    await navigator.clipboard.writeText(allText);
     setCopiedText(true);
     setTimeout(() => setCopiedText(false), 2000);
   };
 
-  const stepCount = turn.steps.length;
-  const hasSteps = stepCount > 0;
-  const hasText = turn.agentText.length > 0;
-  const hasResult = !!turn.result;
   const hasError = !!turn.error;
   const hasFiles = turn.filesCreated.length > 0;
+  const hasResult = !!turn.result;
+  const lastSegIdx = turn.segments.length - 1;
 
   return (
     <div className="animate-[slideUp_0.2s_ease-out] space-y-3">
@@ -71,113 +70,75 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
         </button>
       </div>
 
-      {/* Agent Response */}
+      {/* Agent Response — ordered segments */}
       <div className="pl-2 space-y-2">
 
-        {/* Steps Section */}
-        {hasSteps && (
-          <div className="border border-[#2e2e3a] rounded-xl overflow-hidden bg-[#1e1e24]">
-            <button
-              onClick={() => toggleStepsCollapsed(chatId, turn.id)}
-              className="w-full flex items-center gap-2 px-4 py-2.5 text-xs text-[#5a5a6a] hover:text-[#9a9ab0] hover:bg-[#252530] transition-colors"
-            >
-              {turn.stepsCollapsed ? (
-                <ChevronRight size={13} className="text-[#00a8e8]" />
-              ) : (
-                <ChevronDown size={13} className="text-[#00a8e8]" />
-              )}
-              <span className="font-medium text-[#b0b0c0]">
-                {turn.stepsCollapsed
-                  ? `${stepCount} step${stepCount !== 1 ? 's' : ''}`
-                  : 'Less steps'}
-              </span>
-              {turn.isStreaming && !turn.stepsCollapsed && (
-                <Loader2 size={12} className="ml-auto spinner text-[#00a8e8]" />
-              )}
-              {turn.currentTurn !== undefined && turn.maxTurns !== undefined && (
-                <span className="ml-auto text-[11px] text-[#8a8a9a] font-mono">
-                  {turn.currentTurn}/{turn.maxTurns}
-                </span>
-              )}
-            </button>
+        {turn.segments.map((segment, segIdx) => {
+          const isLastSeg = segIdx === lastSegIdx;
+          const isStreamingSeg = isActive && isLastSeg;
+          const hasSteps = segment.steps.length > 0;
+          const hasText = segment.text.length > 0;
 
-            {!turn.stepsCollapsed && (
-              <div className="px-4 pb-3 space-y-1.5 border-t border-[#2e2e3a]">
-                {turn.steps.map((step) => (
-                  <div key={step.id} className="flex items-start gap-2 py-1">
-                    {step.type === 'tool' ? (
-                      <>
-                        <div className={clsx(
-                          'flex-shrink-0 mt-0.5 w-4 h-4 rounded flex items-center justify-center',
-                          step.completed
-                            ? 'bg-[#003a18] text-[#39e75f]'
-                            : 'bg-[#002a40] text-[#00a8e8]'
-                        )}>
-                          {step.completed ? (
-                            <Check size={9} />
-                          ) : (
-                            <Loader2 size={9} className="spinner" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs text-[#00a8e8] font-medium font-mono">
-                            {step.tool}
-                          </span>
-                          {step.summary && (
-                            <span className="text-xs text-[#7a7a8a] ml-2 truncate">
-                              {step.summary.length > 80 ? step.summary.slice(0, 80) + '…' : step.summary}
-                            </span>
-                          )}
-                        </div>
-                      </>
-                    ) : step.type === 'error' ? (
-                      <>
-                        <AlertCircle size={13} className="flex-shrink-0 mt-0.5 text-red-400" />
-                        <p className="text-xs text-red-400">{step.text}</p>
-                      </>
-                    ) : (
-                      <>
-                        <div className="flex-shrink-0 mt-2 w-1.5 h-1.5 rounded-full bg-[#5a5a6a]" />
-                        <p className="text-xs text-[#9a9ab0] leading-relaxed">{step.text}</p>
-                      </>
+          return (
+            <div key={segment.id} className="space-y-2">
+              {/* Steps block for this segment */}
+              {hasSteps && (
+                <SegmentSteps
+                  segment={segment}
+                  chatId={chatId}
+                  turnId={turn.id}
+                  isStreaming={isStreamingSeg}
+                  currentTurn={turn.currentTurn}
+                  maxTurns={turn.maxTurns}
+                  onToggle={() => toggleSegmentStepsCollapsed(chatId, turn.id, segment.id)}
+                />
+              )}
+
+              {/* Streaming dots — only on last segment, only when no text yet */}
+              {isStreamingSeg && !hasText && (
+                <div className="flex items-center gap-2 px-2 py-1.5">
+                  <div className="flex gap-1">
+                    <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
+                    <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
+                    <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
+                  </div>
+                </div>
+              )}
+
+              {/* Text output for this segment */}
+              {hasText && (
+                <div className="group/text relative bg-[#1e1e26] border border-[#2e2e3a] rounded-xl px-5 py-4">
+                  <div className="prose-agent">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {segment.text}
+                    </ReactMarkdown>
+                    {isStreamingSeg && turn.streamPhase === 'text' && (
+                      <span className="typing-cursor" />
                     )}
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+                  {/* Copy button only on last segment after streaming finishes */}
+                  {isLastSeg && !turn.isStreaming && (
+                    <button
+                      onClick={handleCopyText}
+                      className="absolute top-3 right-3 opacity-0 group-hover/text:opacity-100 transition-opacity p-1 rounded text-[#5a5a6a] hover:text-[#00a8e8] hover:bg-[#2a2a38]"
+                    >
+                      {copiedText ? <CheckCheck size={13} className="text-[#00a8e8]" /> : <Copy size={13} />}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
 
-        {/* Streaming dots */}
-        {turn.isStreaming && !hasText && (
+        {/* Streaming dots when no segments yet */}
+        {isActive && turn.segments.length === 0 && (
           <div className="flex items-center gap-2 px-2 py-1.5">
             <div className="flex gap-1">
               <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
               <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
               <span className="stream-dot w-1.5 h-1.5 rounded-full bg-[#00a8e8] inline-block" />
             </div>
-          </div>
-        )}
-
-        {/* Agent Text Output */}
-        {hasText && (
-          <div className="group relative bg-[#1e1e26] border border-[#2e2e3a] rounded-xl px-5 py-4">
-            <div className="prose-agent">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {turn.agentText}
-              </ReactMarkdown>
-              {turn.isStreaming && turn.streamPhase === 'text' && (
-                <span className="typing-cursor" />
-              )}
-            </div>
-            {!turn.isStreaming && (
-              <button
-                onClick={handleCopyText}
-                className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-[#5a5a6a] hover:text-[#00a8e8] hover:bg-[#2a2a38]"
-              >
-                {copiedText ? <CheckCheck size={13} className="text-[#00a8e8]" /> : <Copy size={13} />}
-              </button>
-            )}
           </div>
         )}
 
@@ -233,6 +194,96 @@ export default function TurnItem({ turn, chatId, isActive }: TurnItemProps) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Steps block for a single segment
+// ---------------------------------------------------------------------------
+interface SegmentStepsProps {
+  segment: TurnSegment;
+  chatId: string;
+  turnId: string;
+  isStreaming: boolean;
+  currentTurn?: number;
+  maxTurns?: number;
+  onToggle: () => void;
+}
+
+function SegmentSteps({ segment, isStreaming, currentTurn, maxTurns, onToggle }: SegmentStepsProps) {
+  const stepCount = segment.steps.length;
+
+  return (
+    <div className="border border-[#2e2e3a] rounded-xl overflow-hidden bg-[#1e1e24]">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-4 py-2.5 text-xs text-[#5a5a6a] hover:text-[#9a9ab0] hover:bg-[#252530] transition-colors"
+      >
+        {segment.stepsCollapsed ? (
+          <ChevronRight size={13} className="text-[#00a8e8]" />
+        ) : (
+          <ChevronDown size={13} className="text-[#00a8e8]" />
+        )}
+        <span className="font-medium text-[#b0b0c0]">
+          {segment.stepsCollapsed
+            ? `${stepCount} step${stepCount !== 1 ? 's' : ''}`
+            : 'Less steps'}
+        </span>
+        {isStreaming && !segment.stepsCollapsed && (
+          <Loader2 size={12} className="ml-auto spinner text-[#00a8e8]" />
+        )}
+        {isStreaming && currentTurn !== undefined && maxTurns !== undefined && (
+          <span className="ml-auto text-[11px] text-[#8a8a9a] font-mono">
+            {currentTurn}/{maxTurns}
+          </span>
+        )}
+      </button>
+
+      {!segment.stepsCollapsed && (
+        <div className="px-4 pb-3 space-y-1.5 border-t border-[#2e2e3a]">
+          {segment.steps.map((step) => (
+            <div key={step.id} className="flex items-start gap-2 py-1">
+              {step.type === 'tool' ? (
+                <>
+                  <div className={clsx(
+                    'flex-shrink-0 mt-0.5 w-4 h-4 rounded flex items-center justify-center',
+                    step.completed
+                      ? 'bg-[#003a18] text-[#39e75f]'
+                      : 'bg-[#002a40] text-[#00a8e8]'
+                  )}>
+                    {step.completed ? (
+                      <Check size={9} />
+                    ) : (
+                      <Loader2 size={9} className="spinner" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span className="text-xs text-[#00a8e8] font-medium font-mono">
+                      {step.tool}
+                    </span>
+                    {step.summary && (
+                      <span className="text-xs text-[#7a7a8a] ml-2 truncate">
+                        {step.summary.length > 80 ? step.summary.slice(0, 80) + '…' : step.summary}
+                      </span>
+                    )}
+                  </div>
+                </>
+              ) : step.type === 'error' ? (
+                <>
+                  <AlertCircle size={13} className="flex-shrink-0 mt-0.5 text-red-400" />
+                  <p className="text-xs text-red-400">{step.text}</p>
+                </>
+              ) : (
+                <>
+                  <div className="flex-shrink-0 mt-2 w-1.5 h-1.5 rounded-full bg-[#5a5a6a]" />
+                  <p className="text-xs text-[#9a9ab0] leading-relaxed">{step.text}</p>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

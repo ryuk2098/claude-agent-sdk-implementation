@@ -9,13 +9,18 @@ export interface AgentStep {
   maxTurns?: number;
 }
 
+export interface TurnSegment {
+  id: string;
+  steps: AgentStep[];
+  stepsCollapsed: boolean;
+  text: string;
+}
+
 export interface ConversationTurn {
   id: string;
   userMessage: string;
   userFiles: string[];
-  steps: AgentStep[];
-  stepsCollapsed: boolean;
-  agentText: string;
+  segments: TurnSegment[];
   isStreaming: boolean;
   streamPhase: 'idle' | 'steps' | 'text' | 'done';
   result?: {

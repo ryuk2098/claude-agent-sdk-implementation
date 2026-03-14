@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { useChatStore } from '../store/chatStore';
 import { createSession, renameSession } from '../api/sessions';
 import { parseSSEStream } from '../utils/stream';
-import { AgentStep, ConversationTurn } from '../types';
+import { AgentStep, TurnSegment, ConversationTurn } from '../types';
 import TurnItem from './TurnItem';
 import InputArea from './InputArea';
 
@@ -23,7 +23,8 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
   const {
     chats, showArtifacts, setShowArtifacts, setArtifact,
     createChat, updateChatSession, updateChatTitle,
-    addTurn, updateTurn, addStep, updateStep, appendAgentText,
+    addTurn, updateTurn,
+    addSegment, addStepToSegment, updateStepInSegment, appendTextToSegment, updateSegment,
     loadMoreHistory, loadHistoryForSession, historyHasMoreMap, isLoadingHistory,
     loadSessions,
   } = useChatStore();
@@ -56,12 +57,10 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
   }, [chatId]);
 
   // Fetch history fresh every time the active chat changes (route-driven)
-  // Only runs for backend sessions (has a sessionId), not brand-new unsaved chats
   useEffect(() => {
     if (!chatId) return;
     const sessionId = useChatStore.getState().chats.find((c) => c.id === chatId)?.sessionId;
     if (!sessionId) return;
-    // Don't refetch if the chat is currently streaming (mid-conversation)
     const streaming = useChatStore.getState().chats
       .find((c) => c.id === chatId)?.turns.some((t) => t.isStreaming);
     if (streaming) return;
@@ -106,7 +105,6 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
       try {
         const { session_id } = await createSession();
         sessionId = session_id;
-        // Set title immediately so sidebar shows it on the very next loadSessions call
         await renameSession(session_id, instruction.slice(0, 80).trim());
       } catch (e) {
         console.error('Failed to pre-create session:', e);
@@ -115,7 +113,6 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
       const newChat = createChat();
       currentChatId = newChat.id;
 
-      // Link session immediately so App.tsx can resolve the chat by sessionId
       if (sessionId) {
         updateChatSession(currentChatId, sessionId);
       }
@@ -128,9 +125,7 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
       id: turnId,
       userMessage: instruction,
       userFiles: files.map((f) => f.name),
-      steps: [],
-      stepsCollapsed: false,
-      agentText: '',
+      segments: [],
       isStreaming: true,
       streamPhase: 'steps',
       filesCreated: [],
@@ -148,7 +143,6 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
     // Navigate to the real session URL immediately (before streaming starts)
     if (sessionId && !chatId) {
       navigate(`/c/${sessionId}`, { replace: true });
-      // Refresh sidebar immediately so new chat appears without waiting for stream to finish
       loadSessions(true);
     }
 
@@ -177,19 +171,40 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
         return;
       }
 
+      // currentSegmentId tracks which segment we're writing into
+      let currentSegmentId: string | null = null;
       let currentStepId: string | null = null;
-      let accumulatedText = '';
+
+      const getOrCreateSegment = (): string => {
+        if (currentSegmentId) return currentSegmentId;
+        const seg: TurnSegment = {
+          id: generateId(),
+          steps: [],
+          stepsCollapsed: false,
+          text: '',
+        };
+        addSegment(currentChatId!, turnId, seg);
+        currentSegmentId = seg.id;
+        return seg.id;
+      };
+
+      const getAllText = (): string => {
+        const turn = useChatStore.getState().chats
+          .find((c) => c.id === currentChatId)?.turns
+          .find((t) => t.id === turnId);
+        return turn?.segments.map((s) => s.text).filter(Boolean).join('\n\n') ?? '';
+      };
 
       for await (const event of parseSSEStream(response)) {
         switch (event.type) {
           case 'session_start':
-            // session_start may return the same UUID we pre-created — update just in case
             if (event.session_id) {
-              updateChatSession(currentChatId, event.session_id);
+              updateChatSession(currentChatId!, event.session_id);
             }
             break;
 
           case 'status': {
+            const segId = getOrCreateSegment();
             const stepId = generateId();
             const step: AgentStep = {
               id: stepId,
@@ -199,9 +214,9 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
               turn: event.turn,
               maxTurns: event.max_turns,
             };
-            addStep(currentChatId, turnId, step);
+            addStepToSegment(currentChatId!, turnId, segId, step);
             if (event.turn !== undefined) {
-              updateTurn(currentChatId, turnId, {
+              updateTurn(currentChatId!, turnId, {
                 currentTurn: event.turn,
                 maxTurns: event.max_turns,
               });
@@ -211,6 +226,25 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
           }
 
           case 'tool_start': {
+            // If the current segment already has text, start a fresh segment for this new round
+            const currentSeg = currentSegmentId
+              ? useChatStore.getState().chats
+                  .find((c) => c.id === currentChatId)?.turns
+                  .find((t) => t.id === turnId)?.segments
+                  .find((s) => s.id === currentSegmentId)
+              : null;
+
+            if (!currentSegmentId || (currentSeg && currentSeg.text.length > 0)) {
+              const seg: TurnSegment = {
+                id: generateId(),
+                steps: [],
+                stepsCollapsed: false,
+                text: '',
+              };
+              addSegment(currentChatId!, turnId, seg);
+              currentSegmentId = seg.id;
+            }
+
             currentStepId = generateId();
             const step: AgentStep = {
               id: currentStepId,
@@ -219,14 +253,14 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
               tool: event.tool,
               completed: false,
             };
-            addStep(currentChatId, turnId, step);
+            addStepToSegment(currentChatId!, turnId, currentSegmentId!, step);
             scrollToBottom();
             break;
           }
 
           case 'tool_end': {
-            if (currentStepId) {
-              updateStep(currentChatId, turnId, currentStepId, {
+            if (currentStepId && currentSegmentId) {
+              updateStepInSegment(currentChatId!, turnId, currentSegmentId, currentStepId, {
                 completed: true,
                 summary: event.summary,
                 text: event.summary ? `${event.tool}: ${event.summary}` : `${event.tool}`,
@@ -239,18 +273,19 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
 
           case 'text_delta': {
             if (event.text) {
-              accumulatedText += event.text;
-              appendAgentText(currentChatId, turnId, event.text);
-              updateTurn(currentChatId, turnId, { streamPhase: 'text' });
+              const segId = getOrCreateSegment();
+              appendTextToSegment(currentChatId!, turnId, segId, event.text);
+              updateTurn(currentChatId!, turnId, { streamPhase: 'text' });
+              const allText = getAllText();
               const title = useChatStore.getState().chats.find((c) => c.id === currentChatId)?.title;
-              setArtifact(title ?? 'Output', accumulatedText);
+              setArtifact(title ?? 'Output', allText);
               scrollToBottom();
             }
             break;
           }
 
           case 'result': {
-            updateTurn(currentChatId, turnId, {
+            updateTurn(currentChatId!, turnId, {
               result: {
                 status: 'success',
                 text: event.result ?? '',
@@ -259,35 +294,40 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
               },
             });
             if (event.result) {
+              const allText = getAllText();
               const title = useChatStore.getState().chats.find((c) => c.id === currentChatId)?.title;
-              setArtifact(title ?? 'Result', accumulatedText || event.result);
+              setArtifact(title ?? 'Result', allText || event.result);
             }
             scrollToBottom();
             break;
           }
 
           case 'error': {
-            updateTurn(currentChatId, turnId, { error: event.message });
+            updateTurn(currentChatId!, turnId, { error: event.message });
             scrollToBottom();
             break;
           }
 
           case 'files': {
             if (event.files_modified?.length) {
-              updateTurn(currentChatId, turnId, { filesCreated: event.files_modified });
+              updateTurn(currentChatId!, turnId, { filesCreated: event.files_modified });
               scrollToBottom();
             }
             break;
           }
 
           case 'done': {
-            updateTurn(currentChatId, turnId, { isStreaming: false, streamPhase: 'done' });
-            const latestTurn = useChatStore.getState().chats
+            // Auto-collapse any segment with more than 4 steps
+            const finalTurn = useChatStore.getState().chats
               .find((c) => c.id === currentChatId)?.turns
               .find((t) => t.id === turnId);
-            if ((latestTurn?.steps.length ?? 0) > 4) {
-              updateTurn(currentChatId, turnId, { stepsCollapsed: true });
-            }
+            finalTurn?.segments.forEach((seg) => {
+              if (seg.steps.length > 4) {
+                updateSegment(currentChatId!, turnId, seg.id, { stepsCollapsed: true });
+              }
+            });
+
+            updateTurn(currentChatId!, turnId, { isStreaming: false, streamPhase: 'done' });
             loadSessions(true);
             scrollToBottom();
             break;
@@ -296,7 +336,7 @@ export default function ChatPanel({ chatId }: ChatPanelProps) {
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-      updateTurn(currentChatId, turnId, {
+      updateTurn(currentChatId!, turnId, {
         isStreaming: false,
         streamPhase: 'done',
         error: `Stream error: ${message}`,

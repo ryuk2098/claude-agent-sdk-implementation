@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Chat, ConversationTurn, AgentStep, SessionListItem } from '../types';
+import { Chat, ConversationTurn, AgentStep, TurnSegment, SessionListItem } from '../types';
 import { fetchSessions, fetchSessionHistory } from '../api/sessions';
 
 function generateId(): string {
@@ -34,12 +34,16 @@ interface ChatStore {
   updateChatTitle: (chatId: string, title: string) => void;
   addTurn: (chatId: string, turn: ConversationTurn) => void;
   updateTurn: (chatId: string, turnId: string, updates: Partial<ConversationTurn>) => void;
-  addStep: (chatId: string, turnId: string, step: AgentStep) => void;
-  updateStep: (chatId: string, turnId: string, stepId: string, updates: Partial<AgentStep>) => void;
-  appendAgentText: (chatId: string, turnId: string, text: string) => void;
-  toggleStepsCollapsed: (chatId: string, turnId: string) => void;
   deleteLocalChat: (chatId: string) => void;
   removeSessionFromList: (sessionId: string) => void;
+
+  // Actions — segment-based streaming
+  addSegment: (chatId: string, turnId: string, segment: TurnSegment) => void;
+  addStepToSegment: (chatId: string, turnId: string, segmentId: string, step: AgentStep) => void;
+  updateStepInSegment: (chatId: string, turnId: string, segmentId: string, stepId: string, updates: Partial<AgentStep>) => void;
+  appendTextToSegment: (chatId: string, turnId: string, segmentId: string, text: string) => void;
+  updateSegment: (chatId: string, turnId: string, segmentId: string, updates: Partial<TurnSegment>) => void;
+  toggleSegmentStepsCollapsed: (chatId: string, turnId: string, segmentId: string) => void;
 
   // Actions — artifacts
   setShowArtifacts: (show: boolean) => void;
@@ -148,73 +152,6 @@ export const useChatStore = create<ChatStore>()(
         }));
       },
 
-      addStep: (chatId, turnId, step) => {
-        set((state) => ({
-          chats: state.chats.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  turns: c.turns.map((t) =>
-                    t.id === turnId ? { ...t, steps: [...t.steps, step] } : t
-                  ),
-                }
-              : c
-          ),
-        }));
-      },
-
-      updateStep: (chatId, turnId, stepId, updates) => {
-        set((state) => ({
-          chats: state.chats.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  turns: c.turns.map((t) =>
-                    t.id === turnId
-                      ? {
-                          ...t,
-                          steps: t.steps.map((s) =>
-                            s.id === stepId ? { ...s, ...updates } : s
-                          ),
-                        }
-                      : t
-                  ),
-                }
-              : c
-          ),
-        }));
-      },
-
-      appendAgentText: (chatId, turnId, text) => {
-        set((state) => ({
-          chats: state.chats.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  turns: c.turns.map((t) =>
-                    t.id === turnId ? { ...t, agentText: t.agentText + text } : t
-                  ),
-                }
-              : c
-          ),
-        }));
-      },
-
-      toggleStepsCollapsed: (chatId, turnId) => {
-        set((state) => ({
-          chats: state.chats.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  turns: c.turns.map((t) =>
-                    t.id === turnId ? { ...t, stepsCollapsed: !t.stepsCollapsed } : t
-                  ),
-                }
-              : c
-          ),
-        }));
-      },
-
       deleteLocalChat: (chatId) => {
         set((state) => {
           const remaining = state.chats.filter((c) => c.id !== chatId);
@@ -231,11 +168,150 @@ export const useChatStore = create<ChatStore>()(
       removeSessionFromList: (sessionId) => {
         set((state) => ({
           sessionList: state.sessionList.filter((s) => s.session_id !== sessionId),
-          // Also remove from local chats if present
           chats: state.chats.filter((c) => c.sessionId !== sessionId),
           activeChatId: state.chats.find((c) => c.sessionId === sessionId)?.id === state.activeChatId
             ? (state.chats.filter((c) => c.sessionId !== sessionId)[0]?.id ?? null)
             : state.activeChatId,
+        }));
+      },
+
+      // ── Segment-based streaming ───────────────────────────────
+
+      addSegment: (chatId, turnId, segment) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? { ...t, segments: [...t.segments, segment] }
+                      : t
+                  ),
+                }
+              : c
+          ),
+        }));
+      },
+
+      addStepToSegment: (chatId, turnId, segmentId, step) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? {
+                          ...t,
+                          segments: t.segments.map((s) =>
+                            s.id === segmentId
+                              ? { ...s, steps: [...s.steps, step] }
+                              : s
+                          ),
+                        }
+                      : t
+                  ),
+                }
+              : c
+          ),
+        }));
+      },
+
+      updateStepInSegment: (chatId, turnId, segmentId, stepId, updates) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? {
+                          ...t,
+                          segments: t.segments.map((s) =>
+                            s.id === segmentId
+                              ? {
+                                  ...s,
+                                  steps: s.steps.map((st) =>
+                                    st.id === stepId ? { ...st, ...updates } : st
+                                  ),
+                                }
+                              : s
+                          ),
+                        }
+                      : t
+                  ),
+                }
+              : c
+          ),
+        }));
+      },
+
+      appendTextToSegment: (chatId, turnId, segmentId, text) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? {
+                          ...t,
+                          segments: t.segments.map((s) =>
+                            s.id === segmentId ? { ...s, text: s.text + text } : s
+                          ),
+                        }
+                      : t
+                  ),
+                }
+              : c
+          ),
+        }));
+      },
+
+      updateSegment: (chatId, turnId, segmentId, updates) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? {
+                          ...t,
+                          segments: t.segments.map((s) =>
+                            s.id === segmentId ? { ...s, ...updates } : s
+                          ),
+                        }
+                      : t
+                  ),
+                }
+              : c
+          ),
+        }));
+      },
+
+      toggleSegmentStepsCollapsed: (chatId, turnId, segmentId) => {
+        set((state) => ({
+          chats: state.chats.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  turns: c.turns.map((t) =>
+                    t.id === turnId
+                      ? {
+                          ...t,
+                          segments: t.segments.map((s) =>
+                            s.id === segmentId
+                              ? { ...s, stepsCollapsed: !s.stepsCollapsed }
+                              : s
+                          ),
+                        }
+                      : t
+                  ),
+                }
+              : c
+          ),
         }));
       },
 
@@ -299,8 +375,6 @@ export const useChatStore = create<ChatStore>()(
         set({ isLoadingHistory: true });
         try {
           const data = await fetchSessionHistory(sessionId, 1, 20);
-
-          // Convert history entries into simplified ConversationTurns
           const turns = historyToTurns(data.history);
 
           set((s) => ({
@@ -335,7 +409,6 @@ export const useChatStore = create<ChatStore>()(
             return {
               chats: s.chats.map((c) =>
                 c.id === chatId
-                  // Prepend older turns before the existing ones
                   ? { ...c, turns: [...newTurns, ...c.turns] }
                   : c
               ),
@@ -352,7 +425,6 @@ export const useChatStore = create<ChatStore>()(
     }),
     {
       name: 'claude-agent-ui',
-      // Only persist UI preferences and chat metadata (no turns — always fetched fresh from API)
       partialize: (state) => ({
         chats: state.chats.slice(0, 50).map((c) => ({ ...c, turns: [] })),
         activeChatId: state.activeChatId,
@@ -371,23 +443,27 @@ function historyToTurns(history: { role: string; content: string; timestamp: str
   for (let i = 0; i < history.length; i++) {
     const entry = history[i];
     if (entry.role === 'user') {
-      // Look ahead for the next assistant/error response
       const next = history[i + 1];
       const agentText =
         next && (next.role === 'assistant' || next.role === 'error')
           ? next.content
           : '';
       if (next && (next.role === 'assistant' || next.role === 'error')) {
-        i++; // consume the assistant entry
+        i++;
       }
 
+      const segment: TurnSegment = {
+        id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+        steps: [],
+        stepsCollapsed: false,
+        text: agentText,
+      };
+
       turns.push({
-        id: generateId(),
+        id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
         userMessage: entry.content,
         userFiles: [],
-        steps: [],
-        stepsCollapsed: true,
-        agentText,
+        segments: [segment],
         isStreaming: false,
         streamPhase: 'done',
         filesCreated: [],
