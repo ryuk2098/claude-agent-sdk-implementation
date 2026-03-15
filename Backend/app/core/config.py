@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     WORKSPACE_DIR: Path = Path(os.getenv("WORKSPACE_DIR", "./workspace")).resolve()
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY")
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY")
 
     MONGODB_URI: str = os.getenv("MONGODB_URI")
     MONGODB_DB_NAME: str = os.getenv("MONGODB_DB_NAME")

@@ -19,7 +19,7 @@ mlflow.db
 
 # Logs
 *.log
-
+logs/
 # OS generated files
 .DS_Store
 .DS_Store?

@@ -1,11 +1,8 @@
 import logging
 import sys
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.api.api import api_router
 
@@ -44,13 +41,3 @@ async def create_db_indexes():
 
 
 app.include_router(api_router)
-
-STATIC_DIR = Path(__file__).parent / "static"
-
-
-@app.get("/")
-async def serve_ui():
-    return FileResponse(STATIC_DIR / "index.html")
-
-
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
