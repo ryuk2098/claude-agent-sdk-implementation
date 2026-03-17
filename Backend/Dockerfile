@@ -28,17 +28,28 @@ RUN uv sync --frozen --no-install-project --no-dev
 # Copy application code
 COPY app/ ./app/
 
+# Copy .claude/ for Skills (pdf, pptx, docx, xlsx, etc.)
+# Place in appuser's home so setting_sources=["user"] finds them
+COPY .claude/ /home/appuser/.claude/
+
 # Second sync: install the project itself (if applicable) and ensure everything is up-to-date
 RUN uv sync --frozen --no-dev
 
 # Put the uv virtual environment on the PATH so `uvicorn` and `python` use it automatically
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Create the workspace directories where uploaded files live
-RUN mkdir -p /workspace/uploads /workspace/processed
+# Create the workspace directory (session dirs are created under here at runtime)
+RUN mkdir -p /workspace
 
-# Change ownership of app and workspace directories to the non-root user
-RUN chown -R appuser:appuser /app /workspace
+# Create log directory (separate from /app and /workspace so agent can't access it)
+RUN mkdir -p /var/log/app
+
+# ---- OS-level security hardening ----
+# appuser owns: /workspace (agent data), /var/log/app (server logs), ~/.claude (skills)
+# /app is root-owned, read-only for appuser — agent cannot modify app code
+RUN chown -R appuser:appuser /workspace /var/log/app /home/appuser/.claude \
+    && chown -R root:root /app \
+    && chmod -R 755 /app
 
 # Switch to the non-root user
 USER appuser

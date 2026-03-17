@@ -33,7 +33,7 @@ async def _save_uploads(session_id: str, files: list[UploadFile] | None) -> list
     if not await session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    _, uploads_dir, _ = ensure_session_dirs(session_id)
+    _, user_uploads, _, _ = ensure_session_dirs(session_id)
     uploaded_names: list[str] = []
 
     for file in files:
@@ -46,7 +46,7 @@ async def _save_uploads(session_id: str, files: list[UploadFile] | None) -> list
             )
 
         safe_filename = Path(file.filename).name
-        dest = uploads_dir / safe_filename
+        dest = user_uploads / safe_filename
 
         try:
             async with aiofiles.open(dest, "wb") as f:

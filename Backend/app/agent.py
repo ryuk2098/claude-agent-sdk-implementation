@@ -29,7 +29,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent
 
-from app.hooks import block_deletions, enforce_file_isolation
+from app.hooks import block_deletions_except_scratch, enforce_file_isolation
 from app.db.sessions import (
     create_session,
     generate_session_id,
@@ -42,6 +42,16 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+async def _prompt_stream(text: str, session_id: str = ""):
+    """Wrap a string prompt as an AsyncIterable to avoid deadlock when hooks are enabled."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+        "session_id": session_id,
+    }
+
 # ---------------------------------------------------------------------------
 # Fix: Allow running locally inside a Claude Code terminal session.
 # ---------------------------------------------------------------------------
@@ -52,18 +62,24 @@ if "CLAUDECODE" in os.environ:
 # Constants & path helpers
 # ---------------------------------------------------------------------------
 
-def get_session_paths(session_id: str) -> tuple[Path, Path, Path]:
+def get_session_paths(session_id: str) -> tuple[Path, Path, Path, Path]:
     """Return (session_root, uploads_dir, processed_dir) for a session."""
     session_root = settings.WORKSPACE_DIR / session_id
-    return session_root, session_root / "uploads", session_root / "processed"
+    return (
+        session_root, 
+        session_root / "user-uploads", 
+        session_root / "scratch",
+        session_root / "artifacts",
+        )
 
 
-def ensure_session_dirs(session_id: str) -> tuple[Path, Path, Path]:
+def ensure_session_dirs(session_id: str) -> tuple[Path, Path, Path, Path]:
     """Create and return the session directory structure."""
-    session_root, uploads_dir, processed_dir = get_session_paths(session_id)
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    return session_root, uploads_dir, processed_dir
+    session_root, user_uploads, scratch, artifacts = get_session_paths(session_id)
+    user_uploads.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    return session_root, user_uploads, scratch, artifacts
 
 
 # Relative paths — the agent's cwd is session_root, so ./uploads and
@@ -71,16 +87,20 @@ def ensure_session_dirs(session_id: str) -> tuple[Path, Path, Path]:
 SYSTEM_PROMPT_APPEND = """
 You are a document processing agent.
 
-Your working directory is the session root.
-Uploaded files (read-only source documents) are in: ./uploads
-Your output directory for processed results is: ./processed
+Your working directory is the session root. You have three directories:
+
+  ./user-uploads/  — READ ONLY. Source files uploaded by the user.
+  ./scratch/       — READ, WRITE, DELETE. Your private scratchpad. Use it freely
+                     for temporary files, intermediate outputs, helper scripts, etc.
+                     The user does not see this folder.
+  ./artifacts/     — READ, WRITE. Final deliverables for the user. Save all outputs
+                     the user should receive here.
 
 RULES:
-- You MUST NEVER delete any files. Only read, copy, edit, and create.
-- When editing a document, always make a copy first and edit the copy.
-- Save ALL outputs to your processed output directory: ./processed
-- You may READ files from the uploads directory but NEVER write there.
-- Use the available Skills to read .pptx, .docx, and .xlsx files.
+- NEVER delete files in ./user-uploads/ or ./artifacts/.
+- You MAY delete files in ./scratch/ as needed.
+- When editing a source document, always work from a copy — copy it to ./scratch/ first and edit there, then save the final result to ./artifacts/.
+- Use the available Skills to read .pdf, .pptx, .docx, and .xlsx files.
 - Be thorough and report what you did after completing a task.
 """.strip()
 
@@ -121,19 +141,21 @@ def _build_options(
     """Build ClaudeAgentOptions with hooks, permissions, and Skills."""
     logger.info(f"Building options — session={app_session_id}, cwd={session_root}")
 
-    uploads_dir = session_root / "uploads"
-    processed_dir = session_root / "processed"
+    # _, user_uploads, scratch, artifacts = get_session_paths(app_session_id)
+    user_uploads = session_root / "user-uploads"
+    scratch = session_root / "scratch"
+    artifacts = session_root / "artifacts"
 
     # Build the system prompt with optional history context
     append_parts = [SYSTEM_PROMPT_APPEND]
 
     # List all currently uploaded files so the agent knows what's available
     # without needing to Glob first — saves a turn.
-    if uploads_dir.exists():
-        uploaded = [f.name for f in uploads_dir.iterdir() if f.is_file()]
+    if user_uploads.exists():
+        uploaded = [f.name for f in user_uploads.iterdir() if f.is_file()]
         if uploaded:
             files_list = "\n".join(f"  - {name}" for name in uploaded)
-            append_parts.append(f"Currently uploaded files in ./uploads:\n{files_list}")
+            append_parts.append(f"Currently uploaded files in ./user-uploads:\n{files_list}")
 
     if history:
         history_text = _format_history(history)
@@ -145,28 +167,22 @@ def _build_options(
     async def session_file_isolation(input_data, tool_use_id, context):
         return await enforce_file_isolation(
             input_data, tool_use_id, context,
-            allowed_write_dir=str(processed_dir),
-            allowed_read_dirs=[str(uploads_dir), str(processed_dir)],
+            session_root=str(session_root),
+            allowed_write_dirs=[str(scratch), str(artifacts)],
+            allowed_delete_dirs=[str(scratch)],
         )
 
     opts = ClaudeAgentOptions(
-        # Working directory is the session root
         cwd=str(session_root),
-
-        # Full Claude Code system prompt + our custom rules appended
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
             "append": append_text,
         },
-
         # Load Skills from .claude/skills/ (user and project level)
         setting_sources=["user", "project"],
-
         # Autonomous — no human-in-the-loop permission prompts
         permission_mode="bypassPermissions",
-
-        # Tools the agent can use
         allowed_tools=[
             "Skill",    # Invoke Skills for document parsing
             "Read",     # Read file contents
@@ -176,21 +192,29 @@ def _build_options(
             "Glob",     # Find files by pattern
             "Grep",     # Search file contents
             "WebSearch",
+            "Agent",    # Spawn sub-agents for complex tasks
         ],
-
-        # Safety hooks: deletion prevention + file isolation
-        # hooks={
-        #     "PreToolUse": [
-        #         HookMatcher(matcher="Bash|Write|Edit", hooks=[
-        #             block_deletions,
-        #             session_file_isolation,
-        #         ]),
-        #     ],
-        # },
-
+        # OS-level sandbox: kernel-enforced filesystem isolation for Bash
+        sandbox={
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+            "enableWeakerNestedSandbox": True,
+        },
+        hooks={
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="Bash|Write|Edit|Read|Glob|Grep",
+                    hooks=[
+                        block_deletions_except_scratch,
+                        session_file_isolation,
+                    ],
+                    timeout=300,
+                ),
+            ],
+        },
         # Safety: cap turns to prevent runaway execution
         max_turns=60,
-
         # Streaming: emit StreamEvent messages for real-time progress
         include_partial_messages=True,
     )
@@ -242,17 +266,17 @@ async def run_agent_stream(
 
     # --- 1. Session setup (same as run_agent) --------------------------------
     is_new = True if session_id is None else not await session_exists(session_id)
-
-    if session_id is None:
-        session_id = generate_session_id()
-        logger.info(f"Stream: Generated new session_id: {session_id}")
+    logger.info(f"is session id None? {is_new}")
 
     if is_new:
+        session_id = generate_session_id()
+        logger.info(f"Stream: Generated new session_id: {session_id}")
         await create_session(session_id, user_id or "", user_email or "")
         sdk_session_id = None
         history = []
         logger.info(f"Stream: Created new session record for {session_id}")
     else:
+        logger.info(f"Found session id: {session_id}")
         session_data = await get_session(session_id)
         sdk_session_id = session_data.get("sdk_session_id")
         # Load history from messages collection (convert turns to flat role/content pairs)
@@ -266,7 +290,7 @@ async def run_agent_stream(
                 history.append({"role": "error", "content": msg["error"], "timestamp": msg["updated_at"]})
         logger.info(f"Stream: Resuming session {session_id} (SDK ID: {sdk_session_id}) with {len(history)} history entries")
 
-    session_root, _, processed_dir = ensure_session_dirs(session_id)
+    session_root, user_uploads, scratch, artifacts = ensure_session_dirs(session_id)
 
     # Build prompt with upload info
     prompt = instruction
@@ -285,8 +309,7 @@ async def run_agent_stream(
         history=history if sdk_session_id is None and history else None,
     )
     
-    logger.info(f"Stream: Built options for session {session_id}. History passed: {bool(options.system_prompt.get('append'))}")
-    logger.info(f"Stream: System prompt append:\n{options.system_prompt.get('append')}")
+    logger.info(f"Stream: Built options for session {session_id}.")
     logger.info(f"Stream: User instruction:\n{instruction}")
 
     # Emit the session_id immediately so the client knows which session to poll
@@ -303,7 +326,7 @@ async def run_agent_stream(
     turn_count: int = 0
 
     try:
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=_prompt_stream(prompt), options=options):
 
             # --- StreamEvent: real-time token-level updates ---
             if isinstance(message, StreamEvent):
@@ -414,9 +437,10 @@ async def run_agent_stream(
             "message": f"Exception: {error_detail}",
             "session_id": session_id,
         })
+        logger.info("error while streaming: {e}", exc_info=True)
 
-        if sdk_session_id:
-            logger.error(f"Failed to resume session {session_id}: {e}")
+        # if sdk_session_id:
+        #     logger.error(f"Failed to resume session {session_id}: {e}")
         return  # Stop the generator
 
     # --- Persist SDK session ID ---
@@ -427,8 +451,8 @@ async def run_agent_stream(
 
     # Emit file list
     files_modified = []
-    if processed_dir.exists():
-        files_modified = [str(p) for p in processed_dir.rglob("*") if p.is_file()]
+    if artifacts.exists():
+        files_modified = [str(p) for p in artifacts.rglob("*") if p.is_file()]
 
     yield AgentEvent("files", {
         "files_modified": files_modified,
@@ -458,7 +482,7 @@ def _summarize_tool_input(tool_name: str, raw_json: str) -> str:
         return data.get("file_path", "")
     elif tool_name == "Bash":
         cmd = data.get("command", "")
-        return cmd[:300]
+        return cmd
     elif tool_name == "Glob":
         return data.get("pattern", "")
     elif tool_name == "Grep":
@@ -472,4 +496,4 @@ def _summarize_tool_input(tool_name: str, raw_json: str) -> str:
             return in_progress[0].get("activeForm", "")
         return f"{len(todos)} todos"
     else:
-        return str(data)[:200]
+        return str(data)

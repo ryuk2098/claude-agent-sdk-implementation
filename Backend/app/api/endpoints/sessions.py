@@ -29,7 +29,7 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 async def create_new_session(current_user: dict = Depends(get_current_user)):
     """Pre-generate a session ID for the current user."""
     sid = generate_session_id()
-    session_root, _, _ = ensure_session_dirs(sid)
+    session_root, _, _, _ = ensure_session_dirs(sid)
     await create_session(sid, current_user["user_id"], current_user["email"])
     return NewSessionResponse(session_id=sid, session_dir=str(session_root))
 

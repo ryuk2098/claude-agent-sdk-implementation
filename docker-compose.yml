@@ -19,6 +19,13 @@ services:
       - WORKSPACE_DIR=/workspace
     volumes:
       - workspace_data:/workspace
+      - claude_data:/home/appuser/.claude  # Persist SDK sessions + skills across restarts
+      - ./Backend/logs:/var/log/app        # Real-time log access on host
+    # Security: drop all capabilities, no privilege escalation
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -41,3 +48,4 @@ services:
 
 volumes:
   workspace_data:
+  claude_data:
