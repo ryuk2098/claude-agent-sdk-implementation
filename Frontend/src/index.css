@@ -96,9 +96,8 @@
   }
 
   .prose-agent pre {
-    @apply p-4 rounded-xl overflow-x-auto mb-3;
+    @apply p-4 overflow-x-auto;
     background: #16161c;
-    border: 1px solid #2e2e3a;
   }
 
   .prose-agent pre code {
@@ -126,8 +125,12 @@
     text-decoration: underline;
   }
 
+  .prose-agent .table-wrap {
+    @apply overflow-x-auto mb-3;
+  }
+
   .prose-agent table {
-    @apply w-full border-collapse mb-3 text-sm;
+    @apply w-full border-collapse text-sm;
   }
 
   .prose-agent th {
@@ -141,7 +144,10 @@
     @apply px-3 py-2;
     border: 1px solid #2e2e3a;
     color: #d0d0e0;
+    word-break: break-word;
+    max-width: 0;
   }
+
 }
 
 /* Typing cursor */
@@ -178,3 +184,104 @@
 .stream-dot:nth-child(1) { animation: streamDot 1.2s ease-in-out infinite; }
 .stream-dot:nth-child(2) { animation: streamDot 1.2s ease-in-out 0.2s infinite; }
 .stream-dot:nth-child(3) { animation: streamDot 1.2s ease-in-out 0.4s infinite; }
+
+/* Artifact preview – always-visible, wider scrollbars */
+.artifact-preview-scroll {
+  overflow: auto !important;
+}
+.artifact-preview-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.artifact-preview-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.artifact-preview-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+}
+.artifact-preview-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* DOCX preview container */
+.docx-container {
+  background: #ffffff;
+  min-height: 100%;
+}
+
+/* Constrain all docx-preview output to the container width.
+   The library injects inline styles with fixed widths/positions,
+   so we need aggressive overrides on every element. */
+.docx-container * {
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+.docx-container .docx-preview {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  overflow: hidden;
+  padding: 1rem;
+}
+
+.docx-container .docx-preview table {
+  table-layout: auto !important;
+}
+
+/* Scrollbars inside the docx container need dark tracks so they're
+   visible against the white background. */
+.docx-container::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+}
+.docx-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.35);
+}
+.docx-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Fix missing bullet glyphs – docx-preview renders bullets as ::before
+   pseudo-elements on <p> tags with classes like "docx-num-X-Y".  The
+   run-style spreads font-family: Wingdings/Symbol which browsers lack,
+   so the glyphs show as empty boxes (□).  Override font-family on ALL
+   ::before / ::marker pseudo-elements inside the docx container. */
+.docx-container span[style*="Wingdings"],
+.docx-container span[style*="Symbol"] {
+  font-family: 'Segoe UI Symbol', 'Apple Symbols', 'Noto Sans Symbols',
+               'Noto Sans Symbols 2', sans-serif !important;
+}
+
+.docx-container [class*="docx-num"]::before,
+.docx-container p[class*="num"]::before {
+  font-family: 'Segoe UI Symbol', 'Apple Symbols', 'Noto Sans Symbols',
+               'Noto Sans Symbols 2', sans-serif !important;
+}
+
+.docx-container li::marker {
+  font-family: 'Segoe UI Symbol', 'Apple Symbols', 'Noto Sans Symbols',
+               'Noto Sans Symbols 2', sans-serif;
+}
+
+/* XLSX preview table */
+.xlsx-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.xlsx-preview th {
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  border: 1px solid #2e2e3a;
+  background: #222228;
+  color: #fff;
+}
+
+.xlsx-preview td {
+  padding: 5px 10px;
+  border: 1px solid #2e2e3a;
+  color: #d0d0e0;
+}

@@ -5,12 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.api import api_router
+from app.core import log
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+import logging
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Document Agent API",
@@ -34,10 +32,12 @@ async def create_db_indexes():
     from app.db.sessions import create_indexes as session_indexes
     from app.db.messages import create_indexes as message_indexes
     from app.db.feedback import create_indexes as feedback_indexes
+    from app.db.artifacts import create_indexes as artifact_indexes
     await user_indexes()
     await session_indexes()
     await message_indexes()
     await feedback_indexes()
+    await artifact_indexes()
 
 
 app.include_router(api_router)
