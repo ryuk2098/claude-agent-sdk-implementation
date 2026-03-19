@@ -344,7 +344,7 @@ function ArtifactPreview({ artifact, sessionId, onBack, onClose }: ArtifactPrevi
             css = css.replace(/font-family\s*:[^;]*(?:Wingdings|Symbol)[^;]*;/gi, '');
             // Replace PUA characters in content: "..." values
             for (const [pua, replacement] of Object.entries(puaBulletMap)) {
-              css = css.replaceAll(pua, replacement);
+              css = css.split(pua).join(replacement);
             }
             // Also replace escaped PUA hex references like \f0b7
             css = css.replace(/\\f0b7/gi, '\\2022');
